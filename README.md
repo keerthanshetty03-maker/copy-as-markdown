@@ -12,3 +12,7 @@ Select text on any webpage → right-click → **Copy as Markdown** → paste in
 2. Enable Developer mode
 3. Click **Load unpacked**
 4. Select this folder
+
+## Privacy
+This extension does not collect, store, or transmit any personal data.
+All processing happens locally in the browser.
