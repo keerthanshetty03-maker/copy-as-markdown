@@ -1,3 +1,8 @@
+if (window.__copyAsMarkdownInjected) {
+  console.log("Copy as Markdown: already injected");
+} else {
+  window.__copyAsMarkdownInjected = true;
+
 console.log("Copy as Markdown: content script loaded on", window.location.href);
 
 function getSelectionHtml() {
@@ -116,3 +121,4 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   return true;
 });
+}
