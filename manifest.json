@@ -3,20 +3,7 @@
   "name": "Copy as Markdown",
   "version": "0.1.0",
   "description": "Copy selected text from any webpage as clean Markdown.",
-<<<<<<< HEAD
-  "commands": {
-    "copy-as-markdown": {
-      "suggested_key": {
-        "default": "Ctrl+Shift+C",
-        "mac": "Command+Shift+C"
-      },
-      "description": "Copy selection as Markdown"
-    }
-  },
-  "permissions": ["contextMenus", "activeTab"],
-=======
   "permissions": ["contextMenus", "activeTab", "scripting"],
->>>>>>> feat/smart-links
   "background": {
     "service_worker": "background.js"
   },
