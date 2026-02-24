@@ -60,10 +60,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 // Keyboard command handler (Cmd/Ctrl+Shift+C)
-chrome.commands.onCommand.addListener((command) => {
+chrome.commands.onCommand.addListener(async (command) => {
   if (command !== "copy-as-markdown") return;
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (!tabs || tabs.length === 0) return;
-    triggerCopyForTab(tabs[0]);
-  });
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tabs || tabs.length === 0) return;
+  await triggerCopyForTab(tabs[0]);
 });

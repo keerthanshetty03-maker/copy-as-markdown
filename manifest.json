@@ -7,9 +7,18 @@
   "background": {
     "service_worker": "background.js"
   },
-"icons": {
-"16": "icon.png",
-"48": "icon.png",
-"128": "icon.png"
-}
+  "commands": {
+    "copy-as-markdown": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+C",
+        "mac": "Cmd+Shift+C"
+      },
+      "description": "Copy selected text as Markdown"
+    }
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  }
 }
