@@ -31,15 +31,13 @@ function isRestrictedUrl(url) {
   }
 }
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== MENU_ID) return;
+// Reusable helper to trigger the copy action for a given tab
+async function triggerCopyForTab(tab) {
   if (!tab?.id) return;
-
   if (isRestrictedUrl(tab.url)) {
     console.warn("Copy as Markdown blocked on restricted page:", tab.url);
     return;
   }
-
   try {
     // Inject only when the user clicks (least privilege)
     await chrome.scripting.executeScript({
@@ -53,4 +51,19 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   } catch (e) {
     console.warn("Copy as Markdown injection/message failed:", e);
   }
+}
+
+// Context menu reuses the same helper
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId !== MENU_ID) return;
+  await triggerCopyForTab(tab);
+});
+
+// Keyboard command handler (Cmd/Ctrl+Shift+C)
+chrome.commands.onCommand.addListener((command) => {
+  if (command !== "copy-as-markdown") return;
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (!tabs || tabs.length === 0) return;
+    triggerCopyForTab(tabs[0]);
+  });
 });
