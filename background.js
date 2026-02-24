@@ -35,15 +35,21 @@ function isRestrictedUrl(url) {
 async function triggerCopyForTab(tab) {
   if (!tab?.id) return;
   if (isRestrictedUrl(tab.url)) {
-    console.warn("Copy as Markdown: blocked on restricted page:", tab?.url);
+    console.warn("Copy as Markdown blocked on restricted page:", tab.url);
     return;
   }
   try {
+    // Inject only when the user clicks (least privilege)
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["turndown.js", "content.js"]
+    });
+
+    // Send message to injected content script
     const res = await chrome.tabs.sendMessage(tab.id, { type: "COPY_SELECTION_AS_MD" });
     if (!res?.ok) console.warn("Copy as Markdown failed:", res?.error);
   } catch (e) {
-    // message may fail if content script not present; handle gracefully
-    console.warn("Error sending message:", e);
+    console.warn("Copy as Markdown injection/message failed:", e);
   }
 }
 
