@@ -11,7 +11,7 @@
     "copy-as-markdown": {
       "suggested_key": {
         "default": "Ctrl+Shift+C",
-        "mac": "Cmd+Shift+C"
+        "mac": "Command+Shift+C"
       },
       "description": "Copy selected text as Markdown"
     }
