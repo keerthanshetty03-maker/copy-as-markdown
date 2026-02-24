@@ -54,56 +54,66 @@ function getSmartLabel(urlString) {
   }
 }
 
-// Post-process Markdown to handle plain URLs and ensure proper link formatting
-function processMarkdownLinks(markdown) {
-  // Match plain URLs (not already in Markdown link format)
-  // Negative lookbehind to avoid URLs already in [text](url) format
-  const urlRegex = /(?<!\[.*)\b(https?:\/\/[^\s\[\]]+)(?!\))/g;
-  
-  let processed = markdown;
-  const matches = [...markdown.matchAll(urlRegex)];
-  
-  // Process in reverse order to maintain correct positions
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const match = matches[i];
-    const urlString = match[1];
-    const start = match.index;
-    const end = start + urlString.length;
-    
-    try {
-      const cleanedUrl = cleanUrl(urlString);
-      const label = getSmartLabel(cleanedUrl);
-      const markdownLink = `[${label}](${cleanedUrl})`;
-      
-      processed = processed.substring(0, start) + markdownLink + processed.substring(end);
-    } catch (e) {
-      // Skip if processing fails for this URL
-    }
+// Fast URL to absolute: avoid URL parsing if not needed
+function makeAbsoluteFast(href) {
+  if (!href) return href;
+  // Already absolute (http/https)?
+  if (/^https?:\/\//.test(href)) return href;
+  try {
+    return new URL(href, window.location.href).toString();
+  } catch (e) {
+    return href;
   }
+}
+
+// Fast URL cleaning: avoid URL parsing if no query string or likely trackers
+function cleanUrlFast(urlString) {
+  if (!urlString || !urlString.includes("?")) {
+    return urlString; // No query string, nothing to clean
+  }
+  // Check if any tracker params are present
+  const trackers = ["utm_", "gclid", "fbclid", "mc_cid", "mc_eid", "igshid"];
+  if (!trackers.some(t => urlString.includes(t))) {
+    return urlString; // No trackers detected
+  }
+  // Parse and clean
+  return cleanUrl(urlString);
+}
+
+// Canonicalize marker text: unescape \[ \], strip brackets, trim
+function canonicalizeMarkerText(text) {
+  if (!text) return "";
   
-  return processed;
+  // Trim whitespace
+  let t = text.trim();
+  
+  // Unescape \[ and \]
+  t = t.replace(/\\\[/g, "[").replace(/\\\]/g, "]");
+  
+  // Strip all surrounding brackets ([ and ])
+  t = t.replace(/^\[+/, "").replace(/\]+$/, "");
+  
+  // Trim again after bracket removal
+  return t.trim();
 }
 
 // Detect if text looks like a citation marker
 function isCitationText(text) {
   if (!text) return false;
   
-  const trimmed = text.trim();
+  const canonical = canonicalizeMarkerText(text);
   
   // Numeric markers: 9, 12, 9a, 12b (1-3 digits optionally followed by 1 letter)
-  if (/^\d{1,3}[a-zA-Z]?$/.test(trimmed)) return true;
-  
-  // Bracketed numeric markers: [9], [[9]]
-  if (/^\[+\d{1,3}[a-zA-Z]?\]+$/.test(trimmed)) return true;
-  
-  // Escaped brackets: [\[9\]]
-  if (/^\[\\?\[?\d{1,3}[a-zA-Z]?\\?\]?\]$/.test(trimmed)) return true;
+  if (/^\d{1,3}[a-zA-Z]?$/.test(canonical)) return true;
   
   // Note/ref markers: note 3, ref 7 (case-insensitive, optional space)
-  if (/^(note|ref)\s*\d{1,3}$/i.test(trimmed)) return true;
+  if (/^(note|ref)\s*\d{1,3}$/i.test(canonical)) return true;
+  
+  // Citation needed marker
+  if (/^citation\s+needed$/i.test(canonical)) return true;
   
   // Symbol markers: *, †, ‡, §
-  if (/^[*†‡§]$/.test(trimmed)) return true;
+  if (/^[*†‡§]$/.test(canonical)) return true;
   
   return false;
 }
@@ -111,121 +121,160 @@ function isCitationText(text) {
 // Normalize citation text to footnote label
 function normalizeCitationLabel(text) {
   if (!text) return null;
-  let t = text.trim();
-
-  // Unescape \[ and \]
-  t = t.replace(/\\\[/g, "[").replace(/\\\]/g, "]");
-
-  // If it's like [[9]] or [9], remove all surrounding brackets
-  t = t.replace(/^\[+/, "").replace(/\]+$/, "");
-
+  
+  const canonical = canonicalizeMarkerText(text);
+  
   // Numeric-like: 9, 12, 9a
-  if (/^\d{1,3}[a-zA-Z]?$/.test(t)) return t.toLowerCase();
-
-  // note/ref: note 3, ref7
-  const m = t.match(/^(note|ref)\s*(\d{1,3})$/i);
-  if (m) return (m[1] + m[2]).toLowerCase();
-
+  if (/^\d{1,3}[a-zA-Z]?$/.test(canonical)) {
+    return canonical.toLowerCase();
+  }
+  
+  // note/ref: note 3, ref 7 -> note3, ref7
+  const noteMatch = canonical.match(/^(note|ref)\s*(\d{1,3})$/i);
+  if (noteMatch) {
+    return (noteMatch[1] + noteMatch[2]).toLowerCase();
+  }
+  
+  // Citation needed -> citationneeded
+  if (/^citation\s+needed$/i.test(canonical)) {
+    return "citationneeded";
+  }
+  
   // Symbol markers: keep raw symbol so caller can decide fn#
-  if (/^[*†‡§]$/.test(t)) return t;
-
+  if (/^[*†‡§]$/.test(canonical)) {
+    return canonical;
+  }
+  
   return null;
 }
 
-// Convert citations to footnotes in Markdown
-function convertCitationsToFootnotes(markdown) {
-  // Map to track: normalized label -> footnote ID
-  // Also track URL -> footnote ID for deduplication
-  const labelToId = {};
-  const urlToId = {};
-  let autoGenCounter = 1;
-  const footnotes = [];
-  
-  // Match Markdown links: [text](url)
+// Single-pass Markdown post-processor: linkify plain URLs and convert citations to footnotes
+function postProcessMarkdown(markdown) {
   const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
-  let processed = markdown;
-  const matches = [...markdown.matchAll(linkRegex)];
+  const urlRegex = /https?:\/\/[^\s\[\]]+/g;
   
-  // Process in reverse order to maintain correct positions
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const match = matches[i];
+  // Track footnote assignments and deduplication
+  const urlToId = {};        // cleaned URL -> footnote ID
+  const preferredIds = {};   // preferred ID -> { count, cleanedUrl }
+  let autoGenCounter = 1;
+  const footnotes = [];      // array of { id, url }
+  
+  let output = "";
+  let lastIndex = 0;
+  let match;
+  
+  // Use exec loop to find all Markdown links
+  while ((match = linkRegex.exec(markdown)) !== null) {
     const linkText = match[1];
     const linkUrl = match[2];
-    const fullMatch = match[0];
-    const start = match.index;
+    const linkStart = match.index;
+    const linkEnd = match.index + match[0].length;
     
-    // Check if link text is a citation marker
-    if (!isCitationText(linkText)) {
-      continue; // Skip non-citation links
-    }
+    // Process text segment before this link: linkify plain URLs
+    const textSegment = markdown.substring(lastIndex, linkStart);
+    output += linkifyPlainUrls(textSegment);
     
-    try {
-      // Convert relative URL to absolute
-      let absoluteUrl = linkUrl;
+    // Process link token
+    if (isCitationText(linkText)) {
+      // Citation link: convert to footnote
       try {
-        absoluteUrl = new URL(linkUrl, window.location.href).toString();
+        const absoluteUrl = makeAbsoluteFast(linkUrl);
+        const cleanedUrl = cleanUrlFast(absoluteUrl);
+        
+        // Check if this URL already has a footnote ID
+        if (urlToId[cleanedUrl]) {
+          const footnoteId = urlToId[cleanedUrl];
+          const beforeChar = output[output.length - 1];
+          const needsSpace = beforeChar && /\w/.test(beforeChar);
+          output += (needsSpace ? " " : "") + `[^${footnoteId}]`;
+        } else {
+          // Assign new footnote ID
+          const preferredLabel = normalizeCitationLabel(linkText);
+          let footnoteId;
+          
+          if (preferredLabel && /^[*†‡§]$/.test(preferredLabel)) {
+            // Symbol: auto-generate [^fn1], [^fn2], ...
+            footnoteId = `fn${autoGenCounter}`;
+            autoGenCounter++;
+          } else if (preferredLabel) {
+            // Numeric or note/ref: use preferred label with collision handling
+            if (!preferredIds[preferredLabel]) {
+              preferredIds[preferredLabel] = { count: 0, urls: [] };
+            }
+            preferredIds[preferredLabel].urls.push(cleanedUrl);
+            
+            if (preferredIds[preferredLabel].count === 0) {
+              footnoteId = preferredLabel;
+            } else {
+              footnoteId = preferredLabel + "-" + (preferredIds[preferredLabel].count + 1);
+            }
+            preferredIds[preferredLabel].count++;
+          } else {
+            // Ambiguous: auto-generate
+            footnoteId = `fn${autoGenCounter}`;
+            autoGenCounter++;
+          }
+          
+          urlToId[cleanedUrl] = footnoteId;
+          footnotes.push({ id: footnoteId, url: cleanedUrl });
+          
+          const beforeChar = output[output.length - 1];
+          const needsSpace = beforeChar && /\w/.test(beforeChar);
+          output += (needsSpace ? " " : "") + `[^${footnoteId}]`;
+        }
       } catch (e) {
-        // Keep as-is if conversion fails
+        // Fallback: keep as normal link
+        output += match[0];
       }
-      
-      // Clean tracking parameters
-      const cleanedUrl = cleanUrl(absoluteUrl);
-      
-      // Normalize the citation label
-      const normalizedLabel = normalizeCitationLabel(linkText);
-      
-      // Determine footnote ID
-      let footnoteId;
-      
-      // Check if this URL already has a footnote (deduplication)
-      if (urlToId[cleanedUrl]) {
-        footnoteId = urlToId[cleanedUrl];
-      } else if (normalizedLabel && /^[*†‡§]$/.test(normalizedLabel)) {
-        // Symbol markers: auto-generate [^fn1], [^fn2], ...
-        footnoteId = `fn${autoGenCounter}`;
-        autoGenCounter++;
-      } else if (normalizedLabel && !labelToId[normalizedLabel]) {
-        // Numeric or note/ref: use normalized label
-        footnoteId = normalizedLabel;
-        labelToId[normalizedLabel] = footnoteId;
-      } else if (normalizedLabel) {
-        // Reuse existing
-        footnoteId = labelToId[normalizedLabel];
-      } else {
-        // Ambiguous: auto-generate
-        footnoteId = `fn${autoGenCounter}`;
-        autoGenCounter++;
-      }
-      
-      // Track this URL
-      if (!urlToId[cleanedUrl]) {
-        urlToId[cleanedUrl] = footnoteId;
-        footnotes.push({ id: footnoteId, url: cleanedUrl });
-      }
-      
-      // Replace link with footnote marker
-      // Ensure space before if attached to a word
-      const beforeMatch = markdown.substring(Math.max(0, start - 1), start);
-      const needsSpace = beforeMatch && /\w/.test(beforeMatch);
-      const replacementMarker = needsSpace ? ` [^${footnoteId}]` : `[^${footnoteId}]`;
-      
-      processed = processed.substring(0, start) + replacementMarker + processed.substring(start + fullMatch.length);
-    } catch (e) {
-      // Skip this link if processing fails
-      continue;
+    } else {
+      // Normal link: keep unchanged
+      output += match[0];
     }
+    
+    lastIndex = linkEnd;
   }
   
-  footnotes.reverse();
-  // Append footnote definitions at the end
+  // Process remaining text: linkify plain URLs
+  if (lastIndex < markdown.length) {
+    output += linkifyPlainUrls(markdown.substring(lastIndex));
+  }
+  
+  // Append footnote definitions
   if (footnotes.length > 0) {
-    processed += "\n\n";
+    output += "\n\n";
     for (const fn of footnotes) {
-      processed += `[^${fn.id}]: ${fn.url}\n`;
+      output += `[^${fn.id}]: ${fn.url}\n`;
     }
   }
   
-  return processed;
+  return output;
+}
+
+// Helper: linkify plain URLs in a text segment
+function linkifyPlainUrls(text) {
+  if (!text.includes("http")) return text;
+  
+  let result = "";
+  let lastIndex = 0;
+  const urlRegex = /https?:\/\/[^\s\[\]]+/g;
+  let match;
+  
+  while ((match = urlRegex.exec(text)) !== null) {
+    // Add text before URL
+    result += text.substring(lastIndex, match.index);
+    
+    // Process URL
+    const urlString = match[0];
+    const cleanedUrl = cleanUrlFast(urlString);
+    const label = getSmartLabel(cleanedUrl);
+    result += `[${label}](${cleanedUrl})`;
+    
+    lastIndex = match.index + match[0].length;
+  }
+  
+  // Add remaining text
+  result += text.substring(lastIndex);
+  return result;
 }
 
 function htmlToMarkdown(html) {
@@ -258,11 +307,8 @@ function htmlToMarkdown(html) {
   let md = service.turndown(html);
   md = md.replace(/\n{3,}/g, "\n\n").trim();
   
-  // Post-process to handle plain URLs
-  md = processMarkdownLinks(md);
-  
-  // Post-process to convert citation links to footnotes
-  md = convertCitationsToFootnotes(md);
+  // Single-pass post-processing: linkify plain URLs and convert citations to footnotes
+  md = postProcessMarkdown(md);
   
   return md;
 }
