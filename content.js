@@ -80,6 +80,21 @@ function cleanUrlFast(urlString) {
   return cleanUrl(urlString);
 }
 
+// Normalize malformed Markdown href: trim and remove stray > or &gt;
+function normalizeMarkdownHref(href) {
+  if (!href) return href;
+  let normalized = href.trim();
+  // Remove HTML entity &gt;
+  if (normalized.endsWith("&gt;")) {
+    normalized = normalized.slice(0, -4).trim();
+  }
+  // Remove literal >
+  if (normalized.endsWith(">")) {
+    normalized = normalized.slice(0, -1).trim();
+  }
+  return normalized;
+}
+
 // Canonicalize marker text: unescape \[ \], strip brackets, trim
 function canonicalizeMarkerText(text) {
   if (!text) return "";
@@ -151,11 +166,10 @@ function normalizeCitationLabel(text) {
 // Single-pass Markdown post-processor: linkify plain URLs and convert citations to footnotes
 function postProcessMarkdown(markdown) {
   const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
-  const urlRegex = /https?:\/\/[^\s\[\]]+/g;
   
   // Track footnote assignments and deduplication
   const urlToId = {};        // cleaned URL -> footnote ID
-  const preferredIds = {};   // preferred ID -> { count, cleanedUrl }
+  const usedIds = new Set(); // set of assigned footnote IDs (for collision detection)
   let autoGenCounter = 1;
   const footnotes = [];      // array of { id, url }
   
@@ -166,7 +180,8 @@ function postProcessMarkdown(markdown) {
   // Use exec loop to find all Markdown links
   while ((match = linkRegex.exec(markdown)) !== null) {
     const linkText = match[1];
-    const linkUrl = match[2];
+    let linkUrl = normalizeMarkdownHref(match[2]);
+    
     const linkStart = match.index;
     const linkEnd = match.index + match[0].length;
     
@@ -193,29 +208,32 @@ function postProcessMarkdown(markdown) {
           let footnoteId;
           
           if (preferredLabel && /^[*†‡§]$/.test(preferredLabel)) {
-            // Symbol: auto-generate [^fn1], [^fn2], ...
+            // Symbol: always auto-generate [^fn1], [^fn2], ...
             footnoteId = `fn${autoGenCounter}`;
             autoGenCounter++;
           } else if (preferredLabel) {
             // Numeric or note/ref: use preferred label with collision handling
-            if (!preferredIds[preferredLabel]) {
-              preferredIds[preferredLabel] = { count: 0, urls: [] };
-            }
-            preferredIds[preferredLabel].urls.push(cleanedUrl);
-            
-            if (preferredIds[preferredLabel].count === 0) {
+            if (!usedIds.has(preferredLabel)) {
+              // Preferred ID is available
               footnoteId = preferredLabel;
             } else {
-              footnoteId = preferredLabel + "-" + (preferredIds[preferredLabel].count + 1);
+              // Collision: find next available suffix
+              let suffix = 2;
+              let candidateId = preferredLabel + "-" + suffix;
+              while (usedIds.has(candidateId)) {
+                suffix++;
+                candidateId = preferredLabel + "-" + suffix;
+              }
+              footnoteId = candidateId;
             }
-            preferredIds[preferredLabel].count++;
           } else {
-            // Ambiguous: auto-generate
+            // Ambiguous: auto-generate fn{counter}
             footnoteId = `fn${autoGenCounter}`;
             autoGenCounter++;
           }
           
           urlToId[cleanedUrl] = footnoteId;
+          usedIds.add(footnoteId);
           footnotes.push({ id: footnoteId, url: cleanedUrl });
           
           const beforeChar = output[output.length - 1];
@@ -223,12 +241,12 @@ function postProcessMarkdown(markdown) {
           output += (needsSpace ? " " : "") + `[^${footnoteId}]`;
         }
       } catch (e) {
-        // Fallback: keep as normal link
-        output += match[0];
+        // Fallback: keep as normal link with normalized URL
+        output += `[${linkText}](${linkUrl})`;
       }
     } else {
-      // Normal link: keep unchanged
-      output += match[0];
+      // Normal link: normalize URL but keep text
+      output += `[${linkText}](${linkUrl})`;
     }
     
     lastIndex = linkEnd;
@@ -247,6 +265,13 @@ function postProcessMarkdown(markdown) {
     }
   }
   
+  // Cleanup: remove stray > that appears after Markdown link closing )
+  output = output.replace(/\)\s*>/g, ')');
+  
+  // Polish formatting: fix heading lines with <[text](url) pattern and ensure space before <
+  output = output.replace(/(\w)</g, '$1 <');
+  output = output.replace(/^(#+\s+.*?)\s<\[([^\]]+)\]\(([^)]+)\)/gm, '$1 — [$2]($3)');
+  
   return output;
 }
 
@@ -256,15 +281,16 @@ function linkifyPlainUrls(text) {
   
   let result = "";
   let lastIndex = 0;
-  const urlRegex = /https?:\/\/[^\s\[\]]+/g;
+  // Safer regex: exclude trailing punctuation and HTML artifacts (< > () [])
+  const urlRegex = /\bhttps?:\/\/[^\s<>()[\]]+/g;
   let match;
   
   while ((match = urlRegex.exec(text)) !== null) {
     // Add text before URL
     result += text.substring(lastIndex, match.index);
     
-    // Process URL
-    const urlString = match[0];
+    // Process URL: normalize first to remove stray >, then clean, then label
+    let urlString = normalizeMarkdownHref(match[0]);
     const cleanedUrl = cleanUrlFast(urlString);
     const label = getSmartLabel(cleanedUrl);
     result += `[${label}](${cleanedUrl})`;
@@ -289,7 +315,9 @@ function htmlToMarkdown(html) {
       return node.nodeName === "A" && node.getAttribute("href");
     },
     replacement: function (content, node) {
-      const href = node.getAttribute("href") || "";
+      let href = node.getAttribute("href") || "";
+      // Normalize href immediately (remove stray > / &gt;)
+      href = normalizeMarkdownHref(href);
       let abs = href;
       try {
         abs = new URL(href, window.location.href).toString();
@@ -297,8 +325,10 @@ function htmlToMarkdown(html) {
         // leave as-is if it cannot be resolved (javascript:, mailto:, or malformed)
         abs = href;
       }
-      // Clean tracking params from anchor URLs
-      abs = cleanUrl(abs);
+      // Normalize again after resolution
+      abs = normalizeMarkdownHref(abs);
+      // Clean tracking params from anchor URLs (use fast version for performance)
+      abs = cleanUrlFast(abs);
       const text = (content || "").trim();
       return text ? `[${text}](${abs})` : `<${abs}>`;
     }
